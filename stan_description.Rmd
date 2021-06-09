@@ -1,0 +1,50 @@
+---
+title: "Stan Intro"
+author: "James Umbanhowar"
+date: "6/9/2021"
+output: html_document
+---
+
+In this document I will highlight working with mark-recapture data using Stan based MCMC estimation of such models.  The data are wide format mark recapture data where each row of data has the individual level data, with multiple columns representing the capture status of the individual.  
+
+```{r}
+source("data_manipulation.R")
+corfu1_wide %>% select(FAM,PHOTO,..1991.07.16:..1991.07.26) %>% slice(1:3)
+```
+
+Note that these data have numeric values that represent the number of recaptures on a single day.  We will eventually need to turn these into 0's and 1's for fitting.  Stan, unfortunately, does not work well with data frames, instead using strictly typed data structures, so in the next few lines of code, I create response variables (a matrix of 0's and 1's where each row is an individual and each column is a time):
+
+```{r}
+corfu1_wide_noNA <- filter(corfu1_wide, !is.na(FAM), !is.na(PHOTO))
+x <- select(corfu1_wide_noNA, ..1991.07.16:..1991.07.26)
+T_study <- dim(x)[2]
+x <- matrix(as.numeric(x != 0), ncol = T_study)
+```
+
+Next, I create the treatment and family variables.  Stan does not do really well with factors, so I just code them as integers:
+
+```{r}
+fam_re <- as.numeric(factor(corfu1_wide_noNA$FAM))
+photo_treat <- as.numeric(factor(corfu1_wide_noNA$PHOTO))
+```
+
+So now I have my data in a suitable format for Stan, I load the library to interface with Stan and set some nice defaults:
+
+```{r}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+Here is the code for fitting the model using stan.  There is a separate file, "cjs.stan" that has all the stan code.  We give it that data that we need and some MCMC parameters.
+
+```{r}
+corfu1_mixed <- stan("cjs.stan", data = list(T = 10, N = length(photo_treat), Nfam = length(unique(fam_re)),Ntreat = length(unique(photo_treat)), y = x, fam = fam_re, photo_treat = photo_treat), iter = 2000, chains = 3)
+```
+
+This takes a while, but when were done, we have chains of estimate posterior distribution that we can use for model interpretation.  The following gives a simple output of the credible intervals for the parameters of interest in the model.
+
+```{r}
+summary(corfu1_mixed, pars = c("beta","fam_tau","p_tau"), probs = c(.025,.5,.975))$summary
+```
+
