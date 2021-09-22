@@ -42,10 +42,8 @@ functions {
 data {
   int<lower=2> T;
   int<lower=0> N;
-  int<lower=0> Nfam;
   int<lower=0> Ntreat;
   int<lower=0,upper=1> y[N, T];
-  int<lower=1, upper=Nfam> fam[N];
   int<lower=0, upper=Ntreat> photo_treat[N];
   int<lower=0, upper=1> sex[N];
   real wing_length[N];
@@ -61,12 +59,10 @@ transformed data {
 }
 
 parameters {
-  vector[Nfam] phi_f;
   real beta;
   real wing_beta;
   real sex_beta;
   real alpha;
-  real<lower=0> fam_tau;
   real<lower=0> phi_tau;
   real<lower=0> p_tau;
   vector[T-1] phi;
@@ -80,7 +76,7 @@ transformed parameters {
 
   for(i in 1:N){
     for(j in 1:(T-1)){
-      phi_hat[i,j] = inv_logit(alpha + beta*photo_treat[i] + wing_beta* wing_length[i] + sex_beta * sex[i] + phi_f[fam[i]] + phi[j]);
+      phi_hat[i,j] = inv_logit(alpha + beta*photo_treat[i] + wing_beta* wing_length[i] + sex_beta * sex[i] + phi[j]);
     }
   chi[i] = prob_uncaptured(T, inv_logit(p), phi_hat[i]);
   }
@@ -89,7 +85,6 @@ transformed parameters {
 model {
   p ~ normal(0,p_tau);
   phi ~ normal(0,phi_tau);
-  phi_f ~ normal(0,fam_tau);
   alpha ~ normal(0, 100);
   beta ~ normal(0,100);
   wing_beta ~ normal(0, 100);

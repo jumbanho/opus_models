@@ -42,13 +42,13 @@ rstan_options(auto_write = TRUE)
 Here is the code for fitting the model using stan.  There is a separate file, "cjs_full_logit.stan" that has all the stan code.  We give it that data that we need and some MCMC parameters.
 
 ```{r eval = FALSE}
-corfu_1991_2_mixed <- stan("cjs_full_logit.stan", data = list(T = T, N = length(photo_treat), Nfam = length(unique(fam_re)),Ntreat = length(unique(photo_treat)), y = x, fam = fam_re, photo_treat = photo_treat, sex = sex, wing_length = wing_length), iter = 1000, chains = 3)
+corfu_1991_2_mixed <- stan("cjs_full_logit.stan", data = list(T = T, N = length(photo_treat), Nfam = length(unique(fam_re)),Ntreat = length(unique(photo_treat)), y = x, fam = fam_re, photo_treat = photo_treat, sex = sex, wing_length = wing_length), iter = 4000, chains = 3)
 ```
 
 This takes a while, but when were done, we have chains of estimate posterior distribution that we can use for model interpretation.  The following gives a simple output of the credible intervals for the parameters of interest in the model.
 
 ```{r eval = FALSE}
-summary(corfu1_mixed, pars = c("beta","wing_beta", "sex_beta","fam_tau","p_tau"), probs = c(.025,.5,.975))$summary
+summary(corfu_1991_2_mixed, pars = c("alpha","beta","wing_beta", "sex_beta","fam_tau","p_tau"), probs = c(.025,.5,.975))$summary
 ```
 
 
@@ -70,7 +70,7 @@ Stan files are programs that are compiled into executable files that run relativ
 
 The next section `tranformed data` consists of some internally transformed data which will be used in fitting of models.  This does not need to be touched to change models.
 
-Next comes the `parameters`g section which contains all the parameters that will be estimated by the MCMC model.  Here I have separate variables for each of the slope parameters, the intercept is represented by `alpha` and the random effect variances have `_tau` suffixes.  `p` and `phi` are the random effects of recapture and survival, respectively.
+Next comes the `parameters` section which contains all the parameters that will be estimated by the MCMC model.  Here I have separate variables for each of the slope parameters, the intercept is represented by `alpha` and the random effect variances have `_tau` suffixes.  `p` and `phi` are the random effects of recapture and survival, respectively.
 
     parameters {
       vector[Nfam] phi_f;
@@ -85,7 +85,7 @@ Next comes the `parameters`g section which contains all the parameters that will
       vector[T] p;
     }
     
-Next come `transformed parameters` which contain the meat of the model, especially in calculating the predicted responses of survival(`phi_hat`) and detection (`chi`).  
+Next come `transformed parameters` which contain the meat of the model, especially in calculating the predicted responses of survival(`phi_hat`) and detection (`chi`). 
 
     transformed parameters {
       matrix<lower=0,upper=1>[N,T] chi;
@@ -98,5 +98,76 @@ Next come `transformed parameters` which contain the meat of the model, especial
       chi[i] = prob_uncaptured(T, inv_logit(p), phi_hat[i]);
       }
     }
+    
+Inside this section lies the regression of survivorship on the variables of interest.  If you would like to change the model to reflect different variables, this is the part to change.
 
-The last section that you will likely not need to change will is the `model` section, which contains all the random variable distributions.  The first three lines are the random effect distributions and the next 4 lines are the priors on the fixed effects.  These are not strictly needed, but I added these as weakly informative priors as it makes fitting a little more stable. 
+The last section is the `model` section, which contains all the random variable distributions.  The first three lines are the random effect distributions and the next 4 lines are the priors on the fixed effects.  These are not strictly needed, but I added these as weakly informative priors as it makes fitting a little more stable.  The only thing that needs to be changed here is removing random distributions for any random effects or priors for fixed effects
+
+    model {
+      p ~ normal(0,p_tau);
+      phi ~ normal(0,phi_tau);
+      phi_f ~ normal(0,fam_tau);
+      alpha ~ normal(0, 100);
+      beta ~ normal(0,100);
+      wing_beta ~ normal(0, 100);
+      sex_beta ~ normal(0,100); 
+  
+      for (i in 1:N) {
+        if (first[i] > 0) {
+          for (t in (first[i]+1):last[i]) {
+            1 ~ bernoulli(phi_hat[i,t-1]);
+            y[i, t] ~ bernoulli(inv_logit(p[t]));
+          }
+          1 ~ bernoulli(chi[i,last[i]]);
+        }   
+      }
+}
+
+
+## Example removing random effect of family
+
+Suppose we now want to create a model that removes the random effect of family.  First, we will want to create a new .stan file that represents this model.  Each model that we want to fit (but not data set) should have a different .stan file.  The new .stan file, which I have called `cjs_full_logit_no_famRE.stan` will need to have all the variables, parameters and distributions related family removed.
+
+First, in the `data` section, I remove the `Nfam` and `fam[]` variables from the section to get the following:
+
+    data {
+      int<lower=2> T;
+      int<lower=0> N;
+      int<lower=0> Ntreat;
+      int<lower=0,upper=1> y[N, T];
+      int<lower=0, upper=Ntreat> photo_treat[N];
+      int<lower=0, upper=1> sex[N];
+      real wing_length[N];
+    }
+    
+Next, in the `parameters` section, I remove `fam_tau` and `phi_f` to get:
+
+    parameters {
+      real beta;
+      real wing_beta;
+      real sex_beta;
+      real alpha;
+      real<lower=0> phi_tau;
+      real<lower=0> p_tau;
+      vector[T-1] phi;
+      vector[T] p;
+    }
+    
+In the `transformed parameters` section, I need to remove the reference to `phi_f` from the regression so I change
+
+      phi_hat[i,j] = inv_logit(alpha + beta*photo_treat[i] + wing_beta* wing_length[i] + sex_beta * sex[i] + phi_f[fam[i]] + phi[j]);
+
+to 
+
+      phi_hat[i,j] = inv_logit(alpha + beta*photo_treat[i] + wing_beta* wing_length[i] + sex_beta * sex[i] + phi[j]);
+
+(note no `phi_f[fam[i]]`)
+
+And finally, I remove the distribution of `phi_f` from the `model` section.
+
+Now when I want to run this model in R, I can use an almost identical call to `rstan`, but with all the family information removed from the `data` argument:
+
+```{r eval = FALSE}
+corfu_1991_2_mixed_no_famRE <- stan("cjs_full_logit_no_famRE.stan", data = list(T = T, N = length(photo_treat),Ntreat = length(unique(photo_treat)), y = x, photo_treat = photo_treat, sex = sex, wing_length = wing_length), iter = 4000, chains = 3)
+```
+
