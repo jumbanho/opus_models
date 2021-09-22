@@ -1,50 +1,102 @@
 ---
 title: "Stan Intro"
 author: "James Umbanhowar"
-date: "6/9/2021"
 output: html_document
 ---
 
 In this document I will highlight working with mark-recapture data using Stan based MCMC estimation of such models.  The data are wide format mark recapture data where each row of data has the individual level data, with multiple columns representing the capture status of the individual.  
 
-```{r}
+First, I run the data_manipulation script which conducted some data manipulations needed and then I conduct some more data manipulations that facilitate model fitting.  Here, I center the forewing length variable and reduce the data frame to those with values in all the variables.
+```{r message = FALSE, }
 source("data_manipulation.R")
-corfu1_wide %>% select(FAM,PHOTO,..1991.07.16:..1991.07.26) %>% slice(1:3)
+corfu_1991_2_wide <- mutate(corfu_1991_2_wide, FWL_cent = FWL - mean(FWL, na.rm = TRUE))
+corfu_1991_2_wide_noNA <- filter(corfu_1991_2_wide,!is.na(FWL), !is.na(FAM), !is.na(PHOTO), !is.na(SEX))
 ```
 
+ 
 Note that these data have numeric values that represent the number of recaptures on a single day.  We will eventually need to turn these into 0's and 1's for fitting.  Stan, unfortunately, does not work well with data frames, instead using strictly typed data structures, so in the next few lines of code, I create response variables (a matrix of 0's and 1's where each row is an individual and each column is a time):
 
 ```{r}
-corfu1_wide_noNA <- filter(corfu1_wide, !is.na(FAM), !is.na(PHOTO))
-x <- select(corfu1_wide_noNA, ..1991.07.16:..1991.07.26)
-T_study <- dim(x)[2]
-x <- matrix(as.numeric(x != 0), ncol = T_study)
+x <- select(corfu_1991_2_wide_noNA, ..1991.07.16:..1991.07.26)
+T = dim(x)[2]
+x <- matrix(as.numeric(x != 0), ncol = T)
 ```
 
-Next, I create the treatment and family variables.  Stan does not do really well with factors, so I just code them as integers:
+Next, I create the treatment, family, sex and wing length variables.  Stan does not do really well with factors, so I just code them as integers:
 
 ```{r}
-fam_re <- as.numeric(factor(corfu1_wide_noNA$FAM))
-photo_treat <- as.numeric(factor(corfu1_wide_noNA$PHOTO))
+fam_re <- as.numeric(factor(corfu_1991_2_wide_noNA$FAM))
+photo_treat <- as.numeric(factor(corfu_1991_2_wide_noNA$PHOTO))-1
+sex <- as.numeric(factor(corfu_1991_2_wide_noNA$SEX))-1
+wing_length <- corfu_1991_2_wide_noNA$FWL_cent
 ```
 
 So now I have my data in a suitable format for Stan, I load the library to interface with Stan and set some nice defaults:
 
-```{r}
+```{r message = FALSE}
 library(rstan)
 options(mc.cores = parallel::detectCores())
 rstan_options(auto_write = TRUE)
 ```
 
-Here is the code for fitting the model using stan.  There is a separate file, "cjs.stan" that has all the stan code.  We give it that data that we need and some MCMC parameters.
+Here is the code for fitting the model using stan.  There is a separate file, "cjs_full_logit.stan" that has all the stan code.  We give it that data that we need and some MCMC parameters.
 
-```{r}
-corfu1_mixed <- stan("cjs.stan", data = list(T = 10, N = length(photo_treat), Nfam = length(unique(fam_re)),Ntreat = length(unique(photo_treat)), y = x, fam = fam_re, photo_treat = photo_treat), iter = 2000, chains = 3)
+```{r eval = FALSE}
+corfu_1991_2_mixed <- stan("cjs_full_logit.stan", data = list(T = T, N = length(photo_treat), Nfam = length(unique(fam_re)),Ntreat = length(unique(photo_treat)), y = x, fam = fam_re, photo_treat = photo_treat, sex = sex, wing_length = wing_length), iter = 1000, chains = 3)
 ```
 
 This takes a while, but when were done, we have chains of estimate posterior distribution that we can use for model interpretation.  The following gives a simple output of the credible intervals for the parameters of interest in the model.
 
-```{r}
-summary(corfu1_mixed, pars = c("beta","fam_tau","p_tau"), probs = c(.025,.5,.975))$summary
+```{r eval = FALSE}
+summary(corfu1_mixed, pars = c("beta","wing_beta", "sex_beta","fam_tau","p_tau"), probs = c(.025,.5,.975))$summary
 ```
 
+
+## Stan file works
+
+Stan files are programs that are compiled into executable files that run relatively quickly (compared to uncompiled functions!).  There are a series of sections that need to be written in order (though some sections can be skipped). The first section, `functions` contain functions which are used elsewhere in the program.  The next section `data` contains all the data that are read into the program from the R environment. These correspond to the values in the `data` argument in the call to `rstan()` above.
+
+    data {
+      int<lower=2> T;
+      int<lower=0> N;
+      int<lower=0> Nfam;
+      int<lower=0> Ntreat;
+      int<lower=0,upper=1> y[N, T];
+      int<lower=1, upper=Nfam> fam[N];
+      int<lower=0, upper=Ntreat> photo_treat[N];
+      int<lower=0, upper=1> sex[N];
+      real wing_length[N];
+    }
+
+The next section `tranformed data` consists of some internally transformed data which will be used in fitting of models.  This does not need to be touched to change models.
+
+Next comes the `parameters`g section which contains all the parameters that will be estimated by the MCMC model.  Here I have separate variables for each of the slope parameters, the intercept is represented by `alpha` and the random effect variances have `_tau` suffixes.  `p` and `phi` are the random effects of recapture and survival, respectively.
+
+    parameters {
+      vector[Nfam] phi_f;
+      real beta;
+      real wing_beta;
+      real sex_beta;
+      real alpha;
+      real<lower=0> fam_tau;
+      real<lower=0> phi_tau;
+      real<lower=0> p_tau;
+      vector[T-1] phi;
+      vector[T] p;
+    }
+    
+Next come `transformed parameters` which contain the meat of the model, especially in calculating the predicted responses of survival(`phi_hat`) and detection (`chi`).  
+
+    transformed parameters {
+      matrix<lower=0,upper=1>[N,T] chi;
+      matrix<lower=0,upper=1>[N,T-1] phi_hat;
+
+      for(i in 1:N){
+        for(j in 1:(T-1)){
+          phi_hat[i,j] = inv_logit(alpha + beta*photo_treat[i] + wing_beta* wing_length[i] + sex_beta * sex[i] + phi_f[fam[i]] + phi[j]);
+        }
+      chi[i] = prob_uncaptured(T, inv_logit(p), phi_hat[i]);
+      }
+    }
+
+The last section that you will likely not need to change will is the `model` section, which contains all the random variable distributions.  The first three lines are the random effect distributions and the next 4 lines are the priors on the fixed effects.  These are not strictly needed, but I added these as weakly informative priors as it makes fitting a little more stable. 
